@@ -1,0 +1,238 @@
+version: '3.7'
+
+networks:
+    AppNetwork:
+        driver: bridge
+        name: ${COMPOSE_PROJECT_NAME}_Network
+        ipam:
+            driver: default
+            config:
+              #  - subnet: 0.0.0.0/16
+
+volumes:
+    redis_data:
+        name: redis_data
+    mysql_data:
+        name: mysql_data
+    rabbitmq_data:
+        name: rabbitmq_data
+
+secrets:
+    mysql_ca:
+        file: ./mysql/ssl/ca.pem
+    mysql_server_key:
+        file: ./mysql/ssl/server-key.pem
+    mysql_server_cert:
+        file: ./mysql/ssl/server-cert.pem
+    mongodb_ca:
+        file: ./mongodb/ssl/ca.pem
+    mongodb_server:
+        file: ./mongodb/ssl/server.pem
+
+services:
+
+    # docker exec -it redis redis-cli -n 0 -p 6379 -a '.7HVhf(Yh+9CF-58' --no-auth-warning
+    redis:
+        image: redis:5-alpine
+        hostname: redis
+        container_name: redis
+        # ports:
+        #     - "63781:6379"
+        volumes:
+            - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+            - redis_data:/data
+        command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--appendonly", "yes"]
+        restart: always
+        networks:
+            AppNetwork:
+                ipv4_address: 172.80.0.3
+
+    # docker exec -it rabbitmq rabbitmqctl -n rabbit@localhost status
+    rabbitmq:
+        image: bitnami/rabbitmq:3.8
+        hostname: rabbitmq
+        container_name: rabbitmq
+        # ports:
+        #     - '15672:15672'
+        #     - '5672:5672'
+        volumes:
+            - 'rabbitmq_data:/bitnami'
+            # - 'rabbitmq_data:/var/lib/rabbitmq/mnesia'
+        environment:
+            RABBITMQ_VHOST: "/"
+            RABBITMQ_USERNAME: "rabbitmq"
+            RABBITMQ_PASSWORD: "rabbitmq"
+            RABBITMQ_ERL_COOKIE: "UEtgBNDwbk"
+        networks:
+            AppNetwork:
+                ipv4_address: 172.80.0.4
+
+    # mongo --tls --tlsAllowInvalidHostnames --tlsAllowInvalidCertificates \
+    #       --tlsCAFile ./mongodb/ssl/ca.pem --tlsCertificateKeyFile ./mongodb/ssl/client.pem \
+    #       --host 127.0.0.1 --port 29019 -u 'root' -p 'jyA7LF_7dX7.pmH' --authenticationDatabase admin
+   # mongodb:
+   #     image: mongo:4.2
+   #     hostname: mongodb
+   #     container_name: mongodb
+   #     command: ["mongod", "--config", "/etc/mongo/mongod.conf"]
+   #     secrets:
+   #         - source: mongodb_ca
+   #           target: /etc/ssl/ca.pem
+   #         - source: mongodb_server
+   #           target: /etc/ssl/server.pem
+        # ports:
+        #     - "29019:27017"
+   #     volumes:
+   #         - ./mongodb/mongod.conf:/etc/mongo/mongod.conf:ro
+   #         - mongodb_data:/data/db
+   #     environment:
+   #         MONGO_INITDB_ROOT_USERNAME: root
+   #         MONGO_INITDB_ROOT_PASSWORD: "jyA7LF_7dX7.pmH"
+   #     networks:
+   #         AppNetwork:
+   #             ipv4_address: 0.0.0.0
+
+    # mysql -h 127.0.0.1 -P 30062 -uapp -p'ExBkhs^NGuA6r_Fu' \
+    #     --ssl-ca=mysql/ssl/ca.pem \
+    #     --ssl-cert=mysql/ssl/client-cert.pem \
+    #     --ssl-key=mysql/ssl/client-key.pem
+    database:
+        image: mysql:8.0
+        hostname: database
+        container_name: database
+        command: ["mysqld"]
+        secrets:
+            - source: mysql_ca
+              target: /etc/mysql-ssl/ca.pem
+            - source: mysql_server_key
+              target: /etc/mysql-ssl/server-key.pem
+            - source: mysql_server_cert
+              target: /etc/mysql-ssl/server-cert.pem
+        volumes:
+            - ./mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+            - mysql_data:/var/lib/mysql
+        env_file:
+            - ./mysql/mysql.env
+        # ports:
+        #     - "30062:3603"
+        restart: always
+        networks:
+            AppNetwork:
+                ipv4_address: 0.0.0.0
+
+    webserver:
+        image: ${WEBSERVER_IMAGE}
+        hostname: webserver
+        container_name: webserver
+        build:
+            context: ./nginx
+            args:
+                SITE_DOMAIN: ${SITE_DOMAIN}
+                TAG_SITE_IMAGE: ${SITE_IMAGE}
+                SITE_SRC: ${SITE_SRC}
+                ADMIN_DOMAIN: ${ADMIN_DOMAIN}
+                TAG_ADMIN_IMAGE: ${ADMIN_IMAGE}
+                ADMIN_SRC: ${ADMIN_SRC}
+        environment:
+            FORCE_CHANGE_OWNERSHIP: 'false'
+            SITE_DOMAIN: ${SITE_DOMAIN}
+            SITE_SRC: ${SITE_SRC}
+            ADMIN_DOMAIN: ${ADMIN_DOMAIN}
+            ADMIN_SRC: ${ADMIN_SRC}
+            # # foo:bar
+            # ADMIN_HTPASSWD: 'foo:$$apr1$$Ls0vzKYg$$Mksb45MS9MFHfl3/qL8oF.'
+        ports:
+            - "${WEBSERVER_PORT_HTTP}:80"
+            - "${WEBSERVER_PORT_HTTPS}:443"
+        depends_on: ['site', 'admin']
+        stop_signal: SIGQUIT
+        restart: always
+        networks:
+            AppNetwork:
+                ipv4_address: 0.0.0.0
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "200k"
+                max-file: "10"
+                tag: "logging-webserver"
+
+    site:
+        image: ${SITE_IMAGE}
+        hostname: site
+        container_name: site
+        build:
+            context: ./../
+            dockerfile: ${LOCAL_DOCKER_PATH}/php/Dockerfile
+            args:
+                APP_ENV: production
+                REMOTE_SRC: ${SITE_SRC}
+                LOCAL_APP_PATH: ${SITE_LOCAL_PATH}
+                LOCAL_DOCKER_PATH: ${LOCAL_DOCKER_PATH}
+        working_dir: ${SITE_SRC}
+        env_file:
+            - site.env
+        ports:
+            - "8801:8800"
+            - "8082:8080"
+        environment:
+            REMOTE_SRC: ${SITE_SRC}
+            CONTAINER_ROLE: app
+            # XDEBUG_ENABLED: 'false'
+            # XDEBUG_REMOTE_HOST: host.docker.internal
+            # # SESSION
+            SESSION_DRIVER: file
+            SESSION_DOMAIN: ${SITE_DOMAIN}
+            SESSION_LIFETIME: 120
+            SESSION_ENCRYPT: 'true'
+            SESSION_SECURE_COOKIE: 'true'
+            # # JWT
+            JWT_SECRET: SomeRandomString
+            JWT_TTL: 20160
+            JWT_REFRESH_TTL: 20160
+        depends_on: ['redis', 'database']
+        stop_signal: SIGQUIT
+        restart: on-failure
+        networks:
+            AppNetwork:
+                ipv4_address: 0.0.0.0
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "200k"
+                max-file: "10"
+                tag: "logging-site"
+
+    admin:
+        image: ${ADMIN_IMAGE}
+        hostname: admin
+        container_name: admin
+        build:
+            context: ./../
+            dockerfile: ${LOCAL_DOCKER_PATH}/php/Dockerfile
+            args:
+                APP_ENV: production
+                REMOTE_SRC: ${ADMIN_SRC}
+                LOCAL_APP_PATH: ${ADMIN_LOCAL_PATH}
+                LOCAL_DOCKER_PATH: ${LOCAL_DOCKER_PATH}
+        working_dir: ${ADMIN_SRC}
+        env_file:
+            - admin.env
+        ports:
+            - "8803:8800"
+            - "8084:8080"
+        environment:
+            REMOTE_SRC: ${ADMIN_SRC}
+            CONTAINER_ROLE: app
+        depends_on: ['redis', 'database']
+        stop_signal: SIGQUIT
+        restart: on-failure
+        networks:
+            AppNetwork:
+                ipv4_address: 0.0.0.0
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "200k"
+                max-file: "10"
+                tag: "logging-admin"
